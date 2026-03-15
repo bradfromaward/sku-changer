@@ -1,0 +1,61 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn() && request.auth.token.admin == true;
+    }
+
+    function isManager() {
+      return signedIn() && request.auth.token.inventory_manager == true;
+    }
+
+    function isStaff() {
+      return signedIn() && request.auth.token.inventory_staff == true;
+    }
+
+    function isAuditor() {
+      return signedIn() && request.auth.token.inventory_auditor == true;
+    }
+
+    function canReadInventory() {
+      return isAdmin() || isManager() || isStaff() || isAuditor();
+    }
+
+    function canWriteInventory() {
+      return isAdmin() || isManager();
+    }
+
+    match /products/{productId} {
+      allow read: if canReadInventory();
+      allow create, update: if canWriteInventory();
+      allow delete: if isAdmin();
+    }
+
+    match /inventoryMovements/{movementId} {
+      allow read: if canReadInventory();
+      // Client writes are blocked; inventory movements are written by trusted backend.
+      allow write: if false;
+    }
+
+    match /orders/{orderId} {
+      allow read: if canReadInventory();
+      allow write: if false;
+    }
+
+    match /shopifyStores/{storeId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /shopifyOAuthStates/{stateId} {
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
