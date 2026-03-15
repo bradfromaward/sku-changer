@@ -44,6 +44,7 @@ Firebase Functions endpoints:
 - `shopifyOrdersCreatePubSub` - Pub/Sub order create consumer
 - `shopifyOrdersCancelledPubSub` - Pub/Sub order cancelled consumer
 - `shopifyRefundsCreatePubSub` - Pub/Sub refund create consumer
+- `syncShopifyProducts` - imports Shopify catalog variants by SKU and maps IDs
 - `syncShopifyOrders` - pulls orders (single store or all stores)
 - `syncStockToShopify` - pushes SOH (single store or all stores)
 
@@ -156,6 +157,7 @@ Shopify webhook subscriptions (`orders/create`, `orders/cancelled`, `refunds/cre
    - `shopifyInventoryItemId`
    - `shopifyLocationId`
 4. Use sync controls to run:
+   - Shopify product pull + ID mapping
    - order sync (store-specific or all stores)
    - SOH push (store-specific or all stores)
 

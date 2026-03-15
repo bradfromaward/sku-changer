@@ -869,6 +869,176 @@ async function processRefundPayload(refundPayload, storeContext, sourceLabel) {
   return applyRefundToInventory(refundPayload, storeContext, sourceLabel);
 }
 
+function normalizeSku(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function buildImportedProductName(shopifyProduct, variant) {
+  const productTitle = String(shopifyProduct?.title || "").trim();
+  const variantTitle = String(variant?.title || "").trim();
+  if (!variantTitle || variantTitle === "Default Title") {
+    return productTitle || "Unnamed Shopify Product";
+  }
+  if (!productTitle) {
+    return variantTitle;
+  }
+  return `${productTitle} - ${variantTitle}`;
+}
+
+function buildStoreMappingFromVariant(shopifyProduct, variant, storeContext) {
+  const mapping = {
+    productId: String(shopifyProduct?.id || ""),
+    variantId: String(variant?.id || ""),
+    inventoryItemId: String(variant?.inventory_item_id || ""),
+  };
+
+  const fallbackLocationId =
+    storeContext?.defaultLocationId || process.env.SHOPIFY_LOCATION_ID || "";
+  if (fallbackLocationId) {
+    mapping.locationId = String(fallbackLocationId);
+  }
+
+  return mapping;
+}
+
+async function syncShopifyProductsForStore(storeContext, options = {}) {
+  const shopify = getShopifyClientForStore(storeContext);
+  const pageDelayMs = getBatchDelayMs(
+    options.pageDelayMs,
+    getBatchDelayMs(process.env.SHOPIFY_PRODUCT_SYNC_PAGE_DELAY_MS, 200),
+  );
+
+  const firestoreProductsSnapshot = await productsRef.get();
+  const productsBySku = new Map();
+  for (const productDoc of firestoreProductsSnapshot.docs) {
+    const product = productDoc.data();
+    const normalizedSku = normalizeSku(product.sku);
+    if (!normalizedSku) {
+      continue;
+    }
+    productsBySku.set(normalizedSku, {
+      id: productDoc.id,
+      ref: productDoc.ref,
+      data: product,
+    });
+  }
+
+  const summary = {
+    pulledProducts: 0,
+    variantsSeen: 0,
+    mappedExisting: 0,
+    createdProducts: 0,
+    skippedNoSku: 0,
+  };
+
+  let sinceId = "";
+  while (true) {
+    const response = await runWithShopifyRetry(
+      () =>
+        shopify.get("/products.json", {
+          params: {
+            limit: 250,
+            status: "any",
+            ...(sinceId ? { since_id: sinceId } : {}),
+          },
+        }),
+      `products fetch for ${storeContext.shop}`,
+    );
+
+    const shopifyProducts = Array.isArray(response.data?.products)
+      ? response.data.products
+      : [];
+
+    if (shopifyProducts.length === 0) {
+      break;
+    }
+
+    summary.pulledProducts += shopifyProducts.length;
+
+    for (const shopifyProduct of shopifyProducts) {
+      const variants = Array.isArray(shopifyProduct.variants)
+        ? shopifyProduct.variants
+        : [];
+
+      for (const variant of variants) {
+        summary.variantsSeen += 1;
+
+        const sku = normalizeSku(variant.sku);
+        if (!sku) {
+          summary.skippedNoSku += 1;
+          continue;
+        }
+
+        const mapping = buildStoreMappingFromVariant(
+          shopifyProduct,
+          variant,
+          storeContext,
+        );
+        const existingEntry = productsBySku.get(sku);
+
+        if (existingEntry) {
+          const currentData = existingEntry.data || {};
+          const updatePayload = {
+            sku,
+            name: currentData.name || buildImportedProductName(shopifyProduct, variant),
+            price: toSafeNumber(variant.price, toSafeNumber(currentData.price, 0)),
+            [`shopifyMappings.${storeContext.storeId}`]: mapping,
+            updatedAt: FieldValue.serverTimestamp(),
+          };
+
+          if (!currentData.shopifyInventoryItemId && mapping.inventoryItemId) {
+            updatePayload.shopifyInventoryItemId = mapping.inventoryItemId;
+          }
+          if (!currentData.shopifyLocationId && mapping.locationId) {
+            updatePayload.shopifyLocationId = mapping.locationId;
+          }
+
+          await existingEntry.ref.set(updatePayload, { merge: true });
+          existingEntry.data = {
+            ...currentData,
+            ...updatePayload,
+          };
+          summary.mappedExisting += 1;
+        } else {
+          const newProduct = {
+            sku,
+            name: buildImportedProductName(shopifyProduct, variant),
+            quantityOnHand: Math.max(0, toSafeNumber(variant.inventory_quantity, 0)),
+            reorderPoint: 0,
+            price: toSafeNumber(variant.price, 0),
+            shopifyInventoryItemId: mapping.inventoryItemId || "",
+            shopifyLocationId: mapping.locationId || "",
+            shopifyMappings: {
+              [storeContext.storeId]: mapping,
+            },
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+            source: "shopify_product_sync",
+          };
+
+          const newProductRef = productsRef.doc();
+          await newProductRef.set(newProduct);
+          productsBySku.set(sku, {
+            id: newProductRef.id,
+            ref: newProductRef,
+            data: newProduct,
+          });
+          summary.createdProducts += 1;
+        }
+      }
+    }
+
+    sinceId = String(shopifyProducts[shopifyProducts.length - 1]?.id || "");
+    if (shopifyProducts.length < 250 || !sinceId) {
+      break;
+    }
+
+    await sleep(pageDelayMs);
+  }
+
+  return summary;
+}
+
 export const shopifyOAuthStart = onRequest(FUNCTION_OPTIONS, async (req, res) => {
   if (req.method !== "GET") {
     res.status(405).json({ error: "Only GET is supported." });
@@ -1202,6 +1372,70 @@ export const shopifyRefundsCreatePubSub = onMessagePublished(
     await processRefundPayload(payload, storeContext, "pubsub_refund_create");
   },
 );
+
+export const syncShopifyProducts = onRequest(FUNCTION_OPTIONS, async (req, res) => {
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "Only POST is supported." });
+    return;
+  }
+
+  if (!isSyncRequestAuthorized(req)) {
+    res.status(401).json({ error: "Invalid sync token." });
+    return;
+  }
+
+  const storeId = typeof req.body?.storeId === "string" ? req.body.storeId : "";
+  const shop = typeof req.body?.shop === "string" ? req.body.shop : "";
+  const pageDelayMs = getBatchDelayMs(req.body?.pageDelayMs, 200);
+
+  try {
+    const stores = await getStoresForSync({ storeId, shop });
+    if (stores.length === 0) {
+      res.status(400).json({ error: "No active Shopify stores found." });
+      return;
+    }
+
+    const summary = {
+      storesProcessed: 0,
+      pulledProducts: 0,
+      variantsSeen: 0,
+      mappedExisting: 0,
+      createdProducts: 0,
+      skippedNoSku: 0,
+      failed: [],
+      storeBreakdown: {},
+    };
+
+    for (const storeContext of stores) {
+      try {
+        const storeSummary = await syncShopifyProductsForStore(storeContext, {
+          pageDelayMs,
+        });
+        summary.storesProcessed += 1;
+        summary.pulledProducts += storeSummary.pulledProducts;
+        summary.variantsSeen += storeSummary.variantsSeen;
+        summary.mappedExisting += storeSummary.mappedExisting;
+        summary.createdProducts += storeSummary.createdProducts;
+        summary.skippedNoSku += storeSummary.skippedNoSku;
+        summary.storeBreakdown[storeContext.storeId] = storeSummary;
+      } catch (error) {
+        summary.failed.push({
+          storeId: storeContext.storeId,
+          shop: storeContext.shop,
+          error: error.message,
+        });
+      }
+    }
+
+    res.status(200).json({
+      message: `Product sync complete. ${summary.createdProducts} created, ${summary.mappedExisting} mapped.`,
+      ...summary,
+    });
+  } catch (error) {
+    logger.error("Product sync failed.", error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 export const syncShopifyOrders = onRequest(FUNCTION_OPTIONS, async (req, res) => {
   if (req.method !== "POST") {

@@ -32,6 +32,7 @@ function App() {
   const [loadingStores, setLoadingStores] = useState(true);
   const [formState, setFormState] = useState(INITIAL_FORM);
   const [submitting, setSubmitting] = useState(false);
+  const [syncingProducts, setSyncingProducts] = useState(false);
   const [syncingOrders, setSyncingOrders] = useState(false);
   const [syncingStock, setSyncingStock] = useState(false);
   const [error, setError] = useState("");
@@ -275,6 +276,14 @@ function App() {
           </div>
           <button
             type="button"
+            disabled={syncingProducts}
+            onClick={() => runSync("syncShopifyProducts", setSyncingProducts)}
+            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
+          >
+            {syncingProducts ? "Pulling products..." : "Pull Shopify products"}
+          </button>
+          <button
+            type="button"
             disabled={syncingOrders}
             onClick={() => runSync("syncShopifyOrders", setSyncingOrders)}
             className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
@@ -290,6 +299,10 @@ function App() {
             {syncingStock ? "Pushing SOH..." : "Push SOH"}
           </button>
         </div>
+        <p className="mb-2 text-xs text-slate-500">
+          Pull Shopify products imports variants by SKU and maps Shopify IDs into each
+          product record for the selected store.
+        </p>
 
         {!functionsBaseUrl ? (
           <p className="text-sm text-amber-700">
