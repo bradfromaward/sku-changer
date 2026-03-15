@@ -128,9 +128,10 @@ function App() {
     const body = {
       ...(selectedStoreId !== ALL_STORES ? { storeId: selectedStoreId } : {}),
     };
+    const endpoint = `${localFunctionsBaseUrl}/${route}`;
 
     try {
-      const response = await fetch(`${localFunctionsBaseUrl}/${route}`, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -146,7 +147,18 @@ function App() {
 
       setMessage(payload.message || `Completed ${route}.`);
     } catch (syncError) {
-      setError(syncError.message);
+      const message = String(syncError?.message || "");
+      const isNetworkError =
+        message.toLowerCase().includes("failed to fetch") ||
+        message.toLowerCase().includes("networkerror");
+
+      if (isNetworkError) {
+        setError(
+          `Cannot reach local functions endpoint: ${endpoint}. Start local Firebase emulators with "firebase emulators:start --only functions,firestore" and restart the frontend.`,
+        );
+      } else {
+        setError(message || "Sync request failed.");
+      }
     } finally {
       setter(false);
     }

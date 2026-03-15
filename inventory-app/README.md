@@ -123,7 +123,13 @@ cd functions && npm install
 npm run dev
 ```
 
-### 5) Deploy backend
+### 5) Run local backend emulators (for local sync/import actions)
+
+```bash
+firebase emulators:start --only functions,firestore
+```
+
+### 6) Deploy backend
 
 From this folder:
 
@@ -131,7 +137,7 @@ From this folder:
 firebase deploy --only functions,firestore
 ```
 
-### 6) Shopify webhook delivery via Google Pub/Sub
+### 7) Shopify webhook delivery via Google Pub/Sub
 
 If your Shopify app uses Google Cloud Pub/Sub delivery:
 
