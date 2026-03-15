@@ -41,6 +41,9 @@ Firebase Functions endpoints:
 - `shopifyOrderCreatedWebhook` - HMAC validation + transactional order decrement
 - `shopifyOrderCancelledWebhook` - HMAC validation + transactional restock
 - `shopifyRefundCreatedWebhook` - HMAC validation + transactional refund restock
+- `shopifyOrdersCreatePubSub` - Pub/Sub order create consumer
+- `shopifyOrdersCancelledPubSub` - Pub/Sub order cancelled consumer
+- `shopifyRefundsCreatePubSub` - Pub/Sub refund create consumer
 - `syncShopifyOrders` - pulls orders (single store or all stores)
 - `syncStockToShopify` - pushes SOH (single store or all stores)
 
@@ -88,6 +91,9 @@ Set:
 - `SHOPIFY_SYNC_BATCH_SIZE` (optional)
 - `SHOPIFY_SYNC_BATCH_DELAY_MS` (optional)
 - `SHOPIFY_REQUEST_DELAY_MS` (optional)
+- `SHOPIFY_PUBSUB_TOPIC_ORDERS_CREATE` (optional)
+- `SHOPIFY_PUBSUB_TOPIC_ORDERS_CANCELLED` (optional)
+- `SHOPIFY_PUBSUB_TOPIC_REFUNDS_CREATE` (optional)
 - `SHOPIFY_LOCATION_ID` (optional fallback)
 - `SYNC_API_KEY` (optional)
 
@@ -116,6 +122,24 @@ From this folder:
 ```bash
 firebase deploy --only functions,firestore
 ```
+
+### 6) Shopify webhook delivery via Google Pub/Sub
+
+If your Shopify app uses Google Cloud Pub/Sub delivery:
+
+1. Create Pub/Sub topics matching your function env names (or defaults):
+   - `shopify-orders-create`
+   - `shopify-orders-cancelled`
+   - `shopify-refunds-create`
+2. Grant Shopify's publisher identity access on each topic:
+   - `delivery@shopify-pubsub-webhooks.iam.gserviceaccount.com`
+   - role: `roles/pubsub.publisher`
+3. In Shopify webhook subscriptions, set topic destinations to your GCP topic paths:
+   - `projects/<GCP_PROJECT_ID>/topics/<TOPIC_NAME>`
+4. Subscribe webhook topics:
+   - `orders/create`
+   - `orders/cancelled`
+   - `refunds/create`
 
 ## Usage notes
 

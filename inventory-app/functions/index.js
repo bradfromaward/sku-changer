@@ -4,6 +4,7 @@ import { initializeApp } from "firebase-admin/app";
 import { FieldValue, getFirestore } from "firebase-admin/firestore";
 import { logger } from "firebase-functions/v2";
 import { onRequest } from "firebase-functions/v2/https";
+import { onMessagePublished } from "firebase-functions/v2/pubsub";
 
 initializeApp();
 
@@ -17,6 +18,16 @@ const shopifyOAuthStatesRef = db.collection("shopifyOAuthStates");
 const FUNCTION_OPTIONS = {
   region: "us-central1",
   cors: true,
+};
+
+const REGION = "us-central1";
+const PUBSUB_TOPICS = {
+  ordersCreate:
+    process.env.SHOPIFY_PUBSUB_TOPIC_ORDERS_CREATE || "shopify-orders-create",
+  ordersCancelled:
+    process.env.SHOPIFY_PUBSUB_TOPIC_ORDERS_CANCELLED || "shopify-orders-cancelled",
+  refundsCreate:
+    process.env.SHOPIFY_PUBSUB_TOPIC_REFUNDS_CREATE || "shopify-refunds-create",
 };
 
 function sleep(ms) {
@@ -113,6 +124,34 @@ function parseJsonBody(req) {
   }
 
   return {};
+}
+
+function parsePubSubJson(event) {
+  const encodedPayload = event?.data?.message?.data;
+  if (!encodedPayload) {
+    return {};
+  }
+
+  try {
+    const decoded = Buffer.from(encodedPayload, "base64").toString("utf8");
+    return JSON.parse(decoded);
+  } catch (error) {
+    logger.error("Failed to decode Pub/Sub JSON payload.", error);
+    return {};
+  }
+}
+
+function getPubSubAttributes(event) {
+  return event?.data?.message?.attributes || {};
+}
+
+function pickFirstDefined(values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+  return "";
 }
 
 function compareDigest(expected, actual) {
@@ -669,8 +708,12 @@ function extractProductMapping(product, storeContext) {
 
 async function getWebhookStoreContext(req) {
   const shopHeader = sanitizeShopDomain(req.get("x-shopify-shop-domain"));
+  return getStoreContextByShopDomain(shopHeader);
+}
+
+async function getStoreContextByShopDomain(shopDomain) {
   const fallbackShop = sanitizeShopDomain(process.env.SHOPIFY_SHOP || "");
-  const shop = shopHeader || fallbackShop;
+  const shop = sanitizeShopDomain(shopDomain) || fallbackShop;
   const storeId = toStoreId(shop);
 
   if (!storeId) {
@@ -689,6 +732,35 @@ async function getWebhookStoreContext(req) {
     defaultLocationId: process.env.SHOPIFY_LOCATION_ID || null,
     status: "active",
   };
+}
+
+async function processOrderCreatedPayload(orderPayload, storeContext, sourceLabel) {
+  const result = await applyOrderToInventory(orderPayload, storeContext, sourceLabel);
+
+  if (orderPayload.cancelled_at) {
+    await restockCancelledOrder(orderPayload, storeContext, `${sourceLabel}_cancelled`);
+  }
+
+  if (Array.isArray(orderPayload.refunds)) {
+    for (const refund of orderPayload.refunds) {
+      await applyRefundToInventory(
+        { ...refund, order_id: orderPayload.id },
+        storeContext,
+        `${sourceLabel}_refund`,
+        orderPayload.line_items,
+      );
+    }
+  }
+
+  return result;
+}
+
+async function processOrderCancelledPayload(orderPayload, storeContext, sourceLabel) {
+  return restockCancelledOrder(orderPayload, storeContext, sourceLabel);
+}
+
+async function processRefundPayload(refundPayload, storeContext, sourceLabel) {
+  return applyRefundToInventory(refundPayload, storeContext, sourceLabel);
 }
 
 export const shopifyOAuthStart = onRequest(FUNCTION_OPTIONS, async (req, res) => {
@@ -834,22 +906,11 @@ export const shopifyOrderCreatedWebhook = onRequest(
     try {
       const order = parseJsonBody(req);
       const storeContext = await getWebhookStoreContext(req);
-      const result = await applyOrderToInventory(order, storeContext, "webhook_order_create");
-
-      if (order.cancelled_at) {
-        await restockCancelledOrder(order, storeContext, "webhook_order_cancelled_inline");
-      }
-
-      if (Array.isArray(order.refunds)) {
-        for (const refund of order.refunds) {
-          await applyRefundToInventory(
-            { ...refund, order_id: order.id },
-            storeContext,
-            "webhook_order_refund_inline",
-            order.line_items,
-          );
-        }
-      }
+      const result = await processOrderCreatedPayload(
+        order,
+        storeContext,
+        "webhook_order_create",
+      );
 
       res.status(200).json({
         ok: true,
@@ -879,7 +940,11 @@ export const shopifyOrderCancelledWebhook = onRequest(
     try {
       const order = parseJsonBody(req);
       const storeContext = await getWebhookStoreContext(req);
-      const result = await restockCancelledOrder(order, storeContext, "webhook_order_cancelled");
+      const result = await processOrderCancelledPayload(
+        order,
+        storeContext,
+        "webhook_order_cancelled",
+      );
       res.status(200).json({
         ok: true,
         orderId: result.orderId,
@@ -908,7 +973,7 @@ export const shopifyRefundCreatedWebhook = onRequest(
     try {
       const refundPayload = parseJsonBody(req);
       const storeContext = await getWebhookStoreContext(req);
-      const result = await applyRefundToInventory(
+      const result = await processRefundPayload(
         refundPayload,
         storeContext,
         "webhook_refund_create",
@@ -923,6 +988,66 @@ export const shopifyRefundCreatedWebhook = onRequest(
       logger.error("Failed processing Shopify refund webhook.", error);
       res.status(500).json({ error: error.message });
     }
+  },
+);
+
+function getPubSubShopDomain(event, payload = {}) {
+  const attributes = getPubSubAttributes(event);
+  return sanitizeShopDomain(
+    pickFirstDefined([
+      attributes["x-shopify-shop-domain"],
+      attributes["X-Shopify-Shop-Domain"],
+      attributes["shopify_shop_domain"],
+      payload.shop_domain,
+      payload.shopDomain,
+    ]),
+  );
+}
+
+async function getPubSubStoreContext(event, payload = {}) {
+  const shopDomain = getPubSubShopDomain(event, payload);
+  return getStoreContextByShopDomain(shopDomain);
+}
+
+export const shopifyOrdersCreatePubSub = onMessagePublished(
+  { topic: PUBSUB_TOPICS.ordersCreate, region: REGION },
+  async (event) => {
+    const payload = parsePubSubJson(event);
+    if (!payload?.id) {
+      logger.warn("shopifyOrdersCreatePubSub received payload without order id.");
+      return;
+    }
+
+    const storeContext = await getPubSubStoreContext(event, payload);
+    await processOrderCreatedPayload(payload, storeContext, "pubsub_order_create");
+  },
+);
+
+export const shopifyOrdersCancelledPubSub = onMessagePublished(
+  { topic: PUBSUB_TOPICS.ordersCancelled, region: REGION },
+  async (event) => {
+    const payload = parsePubSubJson(event);
+    if (!payload?.id) {
+      logger.warn("shopifyOrdersCancelledPubSub received payload without order id.");
+      return;
+    }
+
+    const storeContext = await getPubSubStoreContext(event, payload);
+    await processOrderCancelledPayload(payload, storeContext, "pubsub_order_cancelled");
+  },
+);
+
+export const shopifyRefundsCreatePubSub = onMessagePublished(
+  { topic: PUBSUB_TOPICS.refundsCreate, region: REGION },
+  async (event) => {
+    const payload = parsePubSubJson(event);
+    if (!payload?.id || !payload?.order_id) {
+      logger.warn("shopifyRefundsCreatePubSub payload missing refund or order id.");
+      return;
+    }
+
+    const storeContext = await getPubSubStoreContext(event, payload);
+    await processRefundPayload(payload, storeContext, "pubsub_refund_create");
   },
 );
 
