@@ -49,17 +49,30 @@ function App() {
     if (params.get("shopify") === "connected") {
       const connectedStoreId = params.get("storeId");
       const connectedShop = params.get("shop");
+      const webhookRegistration = params.get("webhookRegistration");
+      const webhookError = params.get("webhookError");
       setMessage(
         connectedStoreId
           ? `Connected Shopify store ${connectedShop || connectedStoreId}.`
           : "Shopify store connected.",
       );
+      if (webhookRegistration === "failed") {
+        setError(
+          webhookError
+            ? `Store connected, but webhook auto-registration failed: ${webhookError}`
+            : "Store connected, but webhook auto-registration failed.",
+        );
+      } else if (webhookRegistration === "ok") {
+        setMessage((previous) => `${previous} Pub/Sub webhooks registered.`);
+      }
       if (connectedStoreId) {
         setSelectedStoreId(connectedStoreId);
       }
       params.delete("shopify");
       params.delete("storeId");
       params.delete("shop");
+      params.delete("webhookRegistration");
+      params.delete("webhookError");
       const next = params.toString();
       window.history.replaceState({}, "", `${window.location.pathname}${next ? `?${next}` : ""}`);
     }

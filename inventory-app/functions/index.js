@@ -29,6 +29,20 @@ const PUBSUB_TOPICS = {
   refundsCreate:
     process.env.SHOPIFY_PUBSUB_TOPIC_REFUNDS_CREATE || "shopify-refunds-create",
 };
+const SHOPIFY_PUBSUB_WEBHOOKS = [
+  {
+    shopifyTopic: "orders/create",
+    pubsubTopic: PUBSUB_TOPICS.ordersCreate,
+  },
+  {
+    shopifyTopic: "orders/cancelled",
+    pubsubTopic: PUBSUB_TOPICS.ordersCancelled,
+  },
+  {
+    shopifyTopic: "refunds/create",
+    pubsubTopic: PUBSUB_TOPICS.refundsCreate,
+  },
+];
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -66,6 +80,30 @@ function getSyncBatchSize() {
 
 function getSyncBatchDelayMs() {
   return getBatchDelayMs(process.env.SHOPIFY_SYNC_BATCH_DELAY_MS, 250);
+}
+
+function getPubSubProjectId() {
+  return (
+    process.env.SHOPIFY_PUBSUB_PROJECT_ID ||
+    process.env.GCLOUD_PROJECT ||
+    process.env.GOOGLE_CLOUD_PROJECT ||
+    process.env.GCP_PROJECT ||
+    ""
+  );
+}
+
+function buildPubSubAddress(projectId, topicName) {
+  if (!projectId) {
+    throw new Error(
+      "Missing Pub/Sub project id. Set SHOPIFY_PUBSUB_PROJECT_ID (or use GCLOUD_PROJECT).",
+    );
+  }
+
+  if (!topicName) {
+    throw new Error("Pub/Sub topic name is required to build destination URI.");
+  }
+
+  return `pubsub://${projectId}:${topicName}`;
 }
 
 function sanitizeShopDomain(input) {
@@ -351,6 +389,74 @@ function getShopifyClientForStore(storeContext) {
     },
     timeout: 20000,
   });
+}
+
+async function ensurePubSubWebhooksForStore(storeContext) {
+  const projectId = getPubSubProjectId();
+  const shopify = getShopifyClientForStore(storeContext);
+
+  const webhooksResponse = await runWithShopifyRetry(
+    () =>
+      shopify.get("/webhooks.json", {
+        params: { limit: 250 },
+      }),
+    `list webhooks for ${storeContext.shop}`,
+  );
+
+  const existingWebhooks = Array.isArray(webhooksResponse.data?.webhooks)
+    ? webhooksResponse.data.webhooks
+    : [];
+
+  const summary = {
+    created: 0,
+    existing: 0,
+    failed: [],
+  };
+
+  for (const webhookConfig of SHOPIFY_PUBSUB_WEBHOOKS) {
+    const address = buildPubSubAddress(projectId, webhookConfig.pubsubTopic);
+    const alreadyExists = existingWebhooks.some(
+      (webhook) =>
+        String(webhook.topic || "").toLowerCase() === webhookConfig.shopifyTopic &&
+        String(webhook.address || "") === address,
+    );
+
+    if (alreadyExists) {
+      summary.existing += 1;
+      continue;
+    }
+
+    try {
+      await runWithShopifyRetry(
+        () =>
+          shopify.post("/webhooks.json", {
+            webhook: {
+              topic: webhookConfig.shopifyTopic,
+              address,
+              format: "json",
+            },
+          }),
+        `create webhook ${webhookConfig.shopifyTopic} for ${storeContext.shop}`,
+      );
+      summary.created += 1;
+    } catch (error) {
+      summary.failed.push({
+        topic: webhookConfig.shopifyTopic,
+        address,
+        error: error.message,
+      });
+    }
+  }
+
+  if (summary.failed.length > 0) {
+    throw new Error(
+      `Webhook auto-registration had ${summary.failed.length} failure(s): ${summary.failed
+        .map((item) => `${item.topic}: ${item.error}`)
+        .join("; ")}`,
+    );
+  }
+
+  return summary;
 }
 
 async function findProductBySku(transaction, sku) {
@@ -866,6 +972,45 @@ export const shopifyOAuthCallback = onRequest(FUNCTION_OPTIONS, async (req, res)
       },
       { merge: true },
     );
+
+    let webhookRegistrationStatus = "ok";
+    let webhookRegistrationError = "";
+    let webhookRegistrationSummary = null;
+    try {
+      webhookRegistrationSummary = await ensurePubSubWebhooksForStore({
+        storeId,
+        shop,
+        accessToken,
+        defaultLocationId: process.env.SHOPIFY_LOCATION_ID || null,
+      });
+      await shopifyStoresRef.doc(storeId).set(
+        {
+          webhookRegistrationStatus: "ok",
+          webhookRegistrationError: "",
+          webhookRegistrationSummary,
+          webhookRegistrationAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+    } catch (registrationError) {
+      webhookRegistrationStatus = "failed";
+      webhookRegistrationError = registrationError.message;
+      logger.error(
+        `Webhook auto-registration failed for store ${shop} (${storeId}).`,
+        registrationError,
+      );
+      await shopifyStoresRef.doc(storeId).set(
+        {
+          webhookRegistrationStatus: "failed",
+          webhookRegistrationError,
+          webhookRegistrationAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+    }
+
     await shopifyOAuthStatesRef.doc(state).delete();
 
     const redirectTarget = stateData.postAuthRedirect;
@@ -874,6 +1019,10 @@ export const shopifyOAuthCallback = onRequest(FUNCTION_OPTIONS, async (req, res)
       callbackUrl.searchParams.set("shopify", "connected");
       callbackUrl.searchParams.set("storeId", storeId);
       callbackUrl.searchParams.set("shop", shop);
+      callbackUrl.searchParams.set("webhookRegistration", webhookRegistrationStatus);
+      if (webhookRegistrationStatus === "failed") {
+        callbackUrl.searchParams.set("webhookError", webhookRegistrationError);
+      }
       res.redirect(callbackUrl.toString());
       return;
     }
@@ -883,6 +1032,9 @@ export const shopifyOAuthCallback = onRequest(FUNCTION_OPTIONS, async (req, res)
       message: "Shopify OAuth completed.",
       storeId,
       shop,
+      webhookRegistrationStatus,
+      webhookRegistrationSummary,
+      webhookRegistrationError,
     });
   } catch (error) {
     logger.error("OAuth callback failed.", error);

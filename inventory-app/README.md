@@ -94,6 +94,7 @@ Set:
 - `SHOPIFY_PUBSUB_TOPIC_ORDERS_CREATE` (optional)
 - `SHOPIFY_PUBSUB_TOPIC_ORDERS_CANCELLED` (optional)
 - `SHOPIFY_PUBSUB_TOPIC_REFUNDS_CREATE` (optional)
+- `SHOPIFY_PUBSUB_PROJECT_ID` (recommended for auto-registration)
 - `SHOPIFY_LOCATION_ID` (optional fallback)
 - `SYNC_API_KEY` (optional)
 
@@ -140,6 +141,12 @@ If your Shopify app uses Google Cloud Pub/Sub delivery:
    - `orders/create`
    - `orders/cancelled`
    - `refunds/create`
+
+OAuth callback now attempts automatic webhook registration for each installed store.  
+If `SHOPIFY_PUBSUB_PROJECT_ID` and topic env values are configured, it will create missing
+Shopify webhook subscriptions (`orders/create`, `orders/cancelled`, `refunds/create`) with:
+
+- `pubsub://<PROJECT-ID>:<TOPIC-NAME>`
 
 ## Usage notes
 
