@@ -71,8 +71,14 @@ cp .env.example .env.local
 
 Populate all `VITE_FIREBASE_*` values and set:
 
-- `VITE_FUNCTIONS_BASE_URL` (your deployed functions base URL)
+- `VITE_FUNCTIONS_BASE_URL` (local emulator/functions URL for sync/import actions)
+- `VITE_OAUTH_FUNCTIONS_BASE_URL` (deployed/public URL for OAuth only)
 - `VITE_SYNC_API_KEY` (must match backend `SYNC_API_KEY`, optional)
+
+Recommended split for local development:
+
+- `VITE_FUNCTIONS_BASE_URL=http://127.0.0.1:5001/<project-id>/us-central1`
+- `VITE_OAUTH_FUNCTIONS_BASE_URL=https://us-central1-<project-id>.cloudfunctions.net`
 
 ### 2) Backend env (functions)
 

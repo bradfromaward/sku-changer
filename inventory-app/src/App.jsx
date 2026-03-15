@@ -38,8 +38,15 @@ function App() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
-  const functionsBaseUrl = useMemo(() => {
+  const localFunctionsBaseUrl = useMemo(() => {
     const rawValue = import.meta.env.VITE_FUNCTIONS_BASE_URL;
+    return rawValue ? rawValue.replace(/\/$/, "") : "";
+  }, []);
+
+  const oauthFunctionsBaseUrl = useMemo(() => {
+    const rawValue =
+      import.meta.env.VITE_OAUTH_FUNCTIONS_BASE_URL ||
+      import.meta.env.VITE_FUNCTIONS_BASE_URL;
     return rawValue ? rawValue.replace(/\/$/, "") : "";
   }, []);
 
@@ -109,7 +116,7 @@ function App() {
   }, []);
 
   async function runSync(route, setter) {
-    if (!functionsBaseUrl) {
+    if (!localFunctionsBaseUrl) {
       setError("VITE_FUNCTIONS_BASE_URL is missing. Set it in .env.local.");
       return;
     }
@@ -123,7 +130,7 @@ function App() {
     };
 
     try {
-      const response = await fetch(`${functionsBaseUrl}/${route}`, {
+      const response = await fetch(`${localFunctionsBaseUrl}/${route}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -146,8 +153,10 @@ function App() {
   }
 
   async function connectStore() {
-    if (!functionsBaseUrl) {
-      setError("VITE_FUNCTIONS_BASE_URL is missing. Set it in .env.local.");
+    if (!oauthFunctionsBaseUrl) {
+      setError(
+        "VITE_OAUTH_FUNCTIONS_BASE_URL is missing. Set it to your deployed functions URL.",
+      );
       return;
     }
 
@@ -157,7 +166,7 @@ function App() {
       return;
     }
 
-    const oauthUrl = new URL(`${functionsBaseUrl}/shopifyOAuthStart`);
+    const oauthUrl = new URL(`${oauthFunctionsBaseUrl}/shopifyOAuthStart`);
     oauthUrl.searchParams.set("shop", normalizedShop);
     oauthUrl.searchParams.set("postAuthRedirect", window.location.origin);
     window.location.assign(oauthUrl.toString());
@@ -240,6 +249,14 @@ function App() {
         </div>
 
         <div className="rounded-md bg-slate-50 p-3 text-sm text-slate-700">
+          <p className="mb-2 text-xs text-slate-500">
+            OAuth can use a deployed URL via{" "}
+            <code className="rounded bg-slate-200 px-1">
+              VITE_OAUTH_FUNCTIONS_BASE_URL
+            </code>{" "}
+            while the sync actions use local{" "}
+            <code className="rounded bg-slate-200 px-1">VITE_FUNCTIONS_BASE_URL</code>.
+          </p>
           <p className="font-medium">Connected stores</p>
           {loadingStores ? <p className="mt-1">Loading stores...</p> : null}
           {!loadingStores && stores.length === 0 ? (
@@ -255,6 +272,15 @@ function App() {
             </ul>
           ) : null}
         </div>
+        {!oauthFunctionsBaseUrl ? (
+          <p className="mt-2 text-sm text-amber-700">
+            Set{" "}
+            <code className="rounded bg-amber-100 px-1">
+              VITE_OAUTH_FUNCTIONS_BASE_URL
+            </code>{" "}
+            to your deployed functions URL for OAuth.
+          </p>
+        ) : null}
       </section>
 
       <section className="mb-5 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -304,7 +330,7 @@ function App() {
           product record for the selected store.
         </p>
 
-        {!functionsBaseUrl ? (
+        {!localFunctionsBaseUrl ? (
           <p className="text-sm text-amber-700">
             Set <code className="rounded bg-amber-100 px-1">VITE_FUNCTIONS_BASE_URL</code>{" "}
             in <code className="rounded bg-amber-100 px-1">.env.local</code>.
