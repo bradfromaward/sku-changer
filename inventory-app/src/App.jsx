@@ -142,7 +142,20 @@ function App() {
 
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(payload.error || "Sync request failed.");
+        const serverError =
+          payload?.error ||
+          payload?.message ||
+          (Object.keys(payload || {}).length > 0 ? JSON.stringify(payload) : "");
+        throw new Error(
+          [
+            `Request failed for "${route}".`,
+            `Endpoint: ${endpoint}`,
+            `HTTP: ${response.status} ${response.statusText}`,
+            serverError ? `Server error: ${serverError}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        );
       }
 
       setMessage(payload.message || `Completed ${route}.`);
@@ -154,7 +167,19 @@ function App() {
 
       if (isNetworkError) {
         setError(
-          `Cannot reach local functions endpoint: ${endpoint}. Start local Firebase emulators with "firebase emulators:start --only functions,firestore" and restart the frontend.`,
+          [
+            `Cannot reach local function "${route}".`,
+            `Endpoint: ${endpoint}`,
+            `Browser message: ${message || "Failed to fetch"}`,
+            `Browser online: ${navigator.onLine ? "yes" : "no"}`,
+            `App origin: ${window.location.origin}`,
+            "",
+            "Checks:",
+            "1) Start emulators: firebase emulators:start --only functions,firestore",
+            `2) Confirm VITE_FUNCTIONS_BASE_URL matches emulator URL and project id`,
+            "3) Open the endpoint directly in browser/Postman to verify it is reachable",
+            "4) If app is https:// and functions URL is http://, browser may block mixed content",
+          ].join("\n"),
         );
       } else {
         setError(message || "Sync request failed.");
@@ -521,7 +546,7 @@ function App() {
       </section>
 
       {error ? (
-        <p className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <p className="mt-4 whitespace-pre-line break-words rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
           {error}
         </p>
       ) : null}
